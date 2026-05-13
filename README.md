@@ -1,10 +1,8 @@
 # PRAP — Police Records Access Project
 
-> Status: pre-release scaffolding (v0.1.0a0). Public release lives in a separate repo.
+This repository contains code produced for the Police Records Access Project (https://bids.berkeley.edu/california-police-records-access-project)
 
-Modular, provider-agnostic, MIT-licensed pipelines for extracting structured
-information from police records. Each pipeline is its own installable package;
-all share a small domain-free `prap-core` library (LiteLLM wrapper, OCR
+Each pipeline is its own installable package; all share a small domain-free `prap-core` library (LiteLLM wrapper, OCR
 adapters, PDF utilities, jsonl I/O, prompt loader, evaluation primitives).
 
 ## Contents
@@ -13,12 +11,12 @@ adapters, PDF utilities, jsonl I/O, prompt loader, evaluation primitives).
 - [Layout](#layout)
 - [Pipelines at a glance](#pipelines-at-a-glance)
 - [Evaluations](#evaluations)
+  - [`prap-clustering`](#prap-clustering)
+  - [`prap-page-stream-segmentation`](#prap-page-stream-segmentation)
   - [`prap-incident-date`](#prap-incident-date)
   - [`prap-case-type`](#prap-case-type)
-  - [`prap-involved-agency`](#prap-involved-agency)
   - [`prap-location`](#prap-location)
-  - [`prap-page-stream-segmentation`](#prap-page-stream-segmentation)
-  - [`prap-clustering`](#prap-clustering)
+  - [`prap-involved-agency`](#prap-involved-agency)
   - [Pipelines without ground truth](#pipelines-without-ground-truth)
 - [`misc/`](#misc)
 - [License](#license)
@@ -63,122 +61,92 @@ documented in each package's README.
 
 ## Evaluations
 
-The six GT-bearing pipelines reproduce their headline numbers in full
-below. Numbers are pulled verbatim from each package README — that
-README is the authoritative source if anything drifts.
+Full eval results for the six pipelines with ground truth. See each
+package's README for the underlying methodology.
 
-### `prap-incident-date`
+### `prap-clustering`
 
-Reference pipeline (Phase 3). End-to-end run on the 209-case parquet
-ground-truth set, gpt-4.1-mini.
+Groups files (PDFs, images, audio, video) released by a single agency
+into incident-level clusters — i.e., deciding which documents,
+photos, and recordings all describe the same underlying case. A
+three-tier cascade prioritizes cheap metadata signals before falling
+back to more expensive LLM-based comparison, which outperforms
+single-tier baselines (regex-only, embedding-only, or LLM-only).
+Evaluated on a 31-agency / 4,937-case GT corpus.
 
-| Total | Precision | Recall | F1 |
-|---:|---:|---:|---:|
-| 209 | **0.9333** | **0.9529** | **0.9430** |
+The hybrid pipeline builds a graph (nodes = files, edges =
+same-incident matches) by running each candidate pair through the
+cascade. Each tier can match a pair, hard-block it, or pass it to
+the next tier:
 
-**Open-source models** (vLLM endpoint, OpenAI-compatible, run 2026-04-22)
-on the same 209-case eval set:
+- **Tier 1 — filepath + filename regex.** Cheap, deterministic.
+  Matches on case-ID overlap or shared deep directory paths;
+  hard-blocks on conflicting case IDs.
+- **Tier 2 — LLM-extracted feature rules.** Structured fields
+  (case IDs, dates, subject/officer names) parsed from per-PDF
+  summaries; requires two corroborating signals to match. A local
+  sentence-transformers cosine-similarity check hard-blocks
+  dissimilar pairs and filters ~97 % of candidates before Tier 3.
+- **Tier 3 — pairwise semantic comparison.** An LLM directly
+  compares concatenated feature summaries for the pairs that
+  survived Tiers 1–2.
 
-| Model | Precision | Recall | F1 |
-|---|---:|---:|---:|
-| **gemma4-31b-it** | **0.9531** | **0.9581** | **0.9556** |
-| qwen3.5-27b | 0.9574 | 0.9424 | 0.9499 |
+Connected components of the resulting match graph form clusters;
+an optional cluster-refinement pass splits over-merged components.
+The ablation rows below toggle which tiers are enabled, plus a
+random-forest variant trained on T1+T2 features and an
+embeddings-only baseline for reference.
 
-Both models match or exceed the proprietary numbers above.
+| Configuration | Precision | Recall | F1 | 95% CI |
+|---|---:|---:|---:|:---:|
+| All tiers + cluster refinement | **0.92** | **0.76** | **0.76** | 0.71–0.81 |
+| All tiers, no refinement | 0.86 | 0.80 | 0.75 | 0.69–0.80 |
+| Tiers 1 + 2 only (no T3) | 0.92 | 0.74 | 0.74 | 0.70–0.80 |
+| Tiers 2 + 3 only (no regex) | 0.94 | 0.71 | 0.73 | 0.67–0.79 |
+| Tier 2 only | 0.94 | 0.68 | 0.71 | 0.65–0.78 |
+| Tier 1 only | 0.96 | 0.63 | 0.67 | 0.60–0.74 |
+| RF (T1+T2 features) | 0.88 | 0.73 | 0.71 | 0.66–0.77 |
+| Embedding baseline (τ=0.85) | 0.64 | 0.63 | 0.43 | 0.35–0.52 |
 
-See [`packages/incident-date/README.md`](packages/incident-date/README.md)
-for the prepare → run → eval flow and behavior notes.
-
-### `prap-case-type`
-
-Three independent binary classifiers (use-of-force, misconduct,
-officer-involved-shooting) plus a micro-aggregate.
-
-| Field | n | Precision | Recall | F1 |
-|---|---:|---:|---:|---:|
-| use_of_force | 214 | 0.9643 | 0.8940 | 0.9278 |
-| misconduct | 214 | 0.9070 | 0.8864 | 0.8966 |
-| officer_involved_shooting | 214 | 0.9677 | 0.9574 | 0.9626 |
-| **overall (micro)** | 642 | **0.9565** | **0.9135** | **0.9345** |
-
-**Open-source models** (vLLM endpoint, OpenAI-compatible, run 2026-04-22)
-on the same eval set, micro-averaged across the three categories:
-
-| Model | Precision | Recall | F1 |
-|---|---:|---:|---:|
-| gemma4-31b-it | 0.9641 | 0.8374 | 0.8963 |
-| qwen3.5-27b | 1.0000 | 0.2284 | 0.3718 |
-
-`gemma4-31b-it` lands close to the proprietary numbers above.
-`qwen3.5-27b` under-predicts True badly and needs prompt adjustment
-before it's usable here.
-
-See [`packages/case-type/README.md`](packages/case-type/README.md).
-
-### `prap-involved-agency`
-
-149 GT-filtered cases → 695 (case, agency, role) rows extracted;
-evaluated at the (case, agency) pair level against 367 GT pairs.
-gpt-4.1-mini, n_threads=16, ~23 min wall-clock.
-
-| Model | n | Precision | Recall | F1 |
-|---|---:|---:|---:|---:|
-| gpt-4.1-mini | 367 | **0.8394** | **0.8822** | **0.8602** |
-
-First metrics on the refactored package. See
-[`packages/involved-agency/README.md`](packages/involved-agency/README.md)
-for the FP/FN breakdown and prompt notes.
-
-### `prap-location`
-
-Three slices, all on the same underlying corpus.
-
-**Initial sample (n=215, raw):**
-
-| Metric | Value |
-|---|---|
-| Precision | 90.6 % |
-| Recall    | 83.8 % |
-| Accuracy  | 83.5 % |
-
-**Post-stratified (reweighted to corpus county distribution):**
-
-| Metric | Value | Δ vs raw |
-|---|---|---|
-| Precision | 92.8 % | +2.2 |
-| Recall    | 89.1 % | +5.3 |
-| Accuracy  | 87.6 % | +4.1 |
-
-Post-stratification corrects for under-representation of very-large
-urban counties in the sample relative to the full corpus.
-
-**Targeted sample (census-designated places / unincorporated areas, n=36):**
-
-| Metric | Value |
-|---|---|
-| Precision | **97.2 %** |
-
-Recap across slices:
-
-| Slice | Precision | Recall |
-|---|---|---|
-| Initial sample (215 cases, raw) | 90.6 % | 83.8 % |
-| Post-stratified (corpus-weighted) | 92.8 % | 89.1 % |
-| Targeted CDP / unincorporated (36 cases) | 97.2 % | — |
-
-Recall numbers are treated as a **lower bound** — spot-checks suggest
-residual GT mislabels from the initial student-labeled pass.
-See [`packages/location/README.md`](packages/location/README.md)
-for the stratification methodology and reproducibility steps.
+See [`packages/clustering/README.md`](packages/clustering/README.md)
+for the three-tier extraction strategy and CLI subcommands.
 
 ### `prap-page-stream-segmentation`
 
-Per-page binary `start-of-doc` classification. Pre-refactor results
-on 155 files / 6,946 pages, `gpt-4.1-mini` via Azure. Refactored
-re-run vs the frozen `labeled-sample-20260217.xlsx` is deferred to
-Phase 7.
+Government disclosures frequently arrive as **compound PDFs**: a
+single file that concatenates many distinct documents (incident
+reports, IA findings, witness statements, etc.) about one or more
+cases. This pipeline segments a compound PDF into its constituent
+documents by classifying each page as either the start of a new
+document or a continuation of the previous one. Pages are classified
+**sequentially with a running history** of prior decisions — so the
+model can reason about which document is currently in progress
+rather than judging each page in isolation, which is what drives the
+gap over history-free baselines in the ablation below. Evaluated on
+155 files / 6,946 pages with `gpt-4.1-mini`.
 
-**Config ablation (default = `d1h1c1`):**
+**Config ablation.** Each page is classified independently, and the
+prompt can include up to three optional signals. The three-letter code
+(`dXhYcZ`) toggles each one on (`1`) or off (`0`):
+
+- **D — domain preamble.** An SB-1421 / police-records background blurb
+  that tells the LLM what kinds of documents (use-of-force reports,
+  IA investigations, etc.) it should expect at document boundaries.
+- **H — running history.** A rolling record of how prior pages in the
+  same PDF were classified (detailed for the last `--recent-window`
+  pages, collapsed for older segments). Lets the model see "we are
+  10 pages into an IA report" rather than judging each page in
+  isolation.
+- **C — previous-page context.** The tail of the previous page's OCR
+  text, for boundary disambiguation when a page begins mid-sentence vs.
+  with a new header.
+
+The default is `d1h1c1` (all three on). Other rows are non-LLM
+controls or alternative architectures: `vision_pairwise` shows two
+consecutive page images to a vision model with no history;
+`full_doc` puts the entire PDF in one call; `embed_sim` uses
+sentence-transformers cosine similarity between adjacent pages;
+`always_split` / `never_split` are trivial baselines.
 
 | Config | Description | Precision | Recall | F1 | 95% CI (F1) |
 |---|---|---|---|---|---|
@@ -230,26 +198,134 @@ Running history dominates input cost (75% of per-page tokens). See
 for the full input-token decomposition, wall-clock numbers, and
 full-corpus cost extrapolation.
 
-### `prap-clustering`
+### `prap-incident-date`
 
-Per-CSV record linkage across three sub-pipelines (hybrid,
-embeddings, metadata). Pre-refactor hybrid baseline on the
-31-agency / 4,937-case GT corpus. Refactored re-run on the GT
-corpus is deferred to Phase 7.
+Extracts the date the underlying incident occurred for each case.
+Incident date is a load-bearing field for downstream **officer
+resolution**: candidate officer mentions in a case are linked against
+California's POST (Peace Officer Standards and Training) employment
+database of ~77,000 certified officers, and the employment-timeline
+check that disambiguates same-name officers requires knowing *when*
+the incident occurred relative to each candidate's tenure at the
+employing agency. Without a correct incident date, an officer who
+accumulates uses of force at one agency and transfers to another
+cannot reliably be tied back to a single POST record. End-to-end run
+on a 209-case ground-truth set with `gpt-4.1-mini`.
 
-| Configuration | Precision | Recall | F1 | 95% CI |
-|---|---:|---:|---:|:---:|
-| All tiers + cluster refinement | **0.92** | **0.76** | **0.76** | 0.71–0.81 |
-| All tiers, no refinement | 0.86 | 0.80 | 0.75 | 0.69–0.80 |
-| Tiers 1 + 2 only (no T3) | 0.92 | 0.74 | 0.74 | 0.70–0.80 |
-| Tiers 2 + 3 only (no regex) | 0.94 | 0.71 | 0.73 | 0.67–0.79 |
-| Tier 2 only | 0.94 | 0.68 | 0.71 | 0.65–0.78 |
-| Tier 1 only | 0.96 | 0.63 | 0.67 | 0.60–0.74 |
-| RF (T1+T2 features) | 0.88 | 0.73 | 0.71 | 0.66–0.77 |
-| Embedding baseline (τ=0.85) | 0.64 | 0.63 | 0.43 | 0.35–0.52 |
+| Total | Precision | Recall | F1 |
+|---:|---:|---:|---:|
+| 209 | **0.9333** | **0.9529** | **0.9430** |
 
-See [`packages/clustering/README.md`](packages/clustering/README.md)
-for the three-tier extraction strategy and CLI subcommands.
+**Open-source models** (vLLM endpoint, OpenAI-compatible, run 2026-04-22)
+on the same 209-case eval set:
+
+| Model | Precision | Recall | F1 |
+|---|---:|---:|---:|
+| **gemma4-31b-it** | **0.9531** | **0.9581** | **0.9556** |
+| qwen3.5-27b | 0.9574 | 0.9424 | 0.9499 |
+
+Both models match or exceed the proprietary numbers above.
+
+See [`packages/incident-date/README.md`](packages/incident-date/README.md).
+
+### `prap-case-type`
+
+Labels each case along three independent binary axes — use-of-force,
+misconduct, and officer-involved-shooting — to support understanding
+the distribution of case types across California agencies. Reported
+as three per-field classifiers plus a micro-aggregate.
+
+| Field | n | Precision | Recall | F1 |
+|---|---:|---:|---:|---:|
+| use_of_force | 214 | 0.9643 | 0.8940 | 0.9278 |
+| misconduct | 214 | 0.9070 | 0.8864 | 0.8966 |
+| officer_involved_shooting | 214 | 0.9677 | 0.9574 | 0.9626 |
+| **overall (micro)** | 642 | **0.9565** | **0.9135** | **0.9345** |
+
+**Open-source models** (vLLM endpoint, OpenAI-compatible, run 2026-04-22)
+on the same eval set, micro-averaged across the three categories:
+
+| Model | Precision | Recall | F1 |
+|---|---:|---:|---:|
+| gemma4-31b-it | 0.9641 | 0.8374 | 0.8963 |
+| qwen3.5-27b | 1.0000 | 0.2284 | 0.3718 |
+
+`gemma4-31b-it` lands close to the proprietary numbers above.
+`qwen3.5-27b` shows much lower recall on the same prompt.
+
+See [`packages/case-type/README.md`](packages/case-type/README.md).
+
+### `prap-location`
+
+Extracts the geographic location (city or unincorporated area, county)
+where each incident occurred, to support understanding the geographic
+distribution of cases across California.
+
+> ⚠️ **Work in progress.** Like `prap-involved-agency`, this
+> pipeline was never published as a public PRAP feature and was
+> not iterated to completion. The numbers below reflect the state
+> of the pipeline when work was paused, not a finalized result.
+
+Three slices, all on the same underlying corpus.
+
+**Initial sample (n=215, raw):**
+
+| Metric | Value |
+|---|---|
+| Precision | 90.6 % |
+| Recall    | 83.8 % |
+| Accuracy  | 83.5 % |
+
+**Post-stratified (reweighted to corpus county distribution):**
+
+| Metric | Value | Δ vs raw |
+|---|---|---|
+| Precision | 92.8 % | +2.2 |
+| Recall    | 89.1 % | +5.3 |
+| Accuracy  | 87.6 % | +4.1 |
+
+Post-stratification corrects for under-representation of very-large
+urban counties in the sample relative to the full corpus.
+
+**Targeted sample (census-designated places / unincorporated areas, n=36):**
+
+| Metric | Value |
+|---|---|
+| Precision | **97.2 %** |
+
+Recap across slices:
+
+| Slice | Precision | Recall |
+|---|---|---|
+| Initial sample (215 cases, raw) | 90.6 % | 83.8 % |
+| Post-stratified (corpus-weighted) | 92.8 % | 89.1 % |
+| Targeted CDP / unincorporated (36 cases) | 97.2 % | — |
+
+Recall numbers are treated as a **lower bound** — spot-checks suggest
+residual GT mislabels from the initial student-labeled pass.
+See [`packages/location/README.md`](packages/location/README.md)
+for the stratification methodology and reproducibility steps.
+
+### `prap-involved-agency`
+
+Extracts all agencies involved in a case along with each agency's role
+(e.g., employing agency, investigating agency, assisting agency), to
+support understanding cross-agency patterns — for example, which
+outside agencies investigate which departments' incidents.
+
+> ⚠️ **Work in progress.** This pipeline was never published as a
+> public PRAP feature, so it was not iterated to completion. The
+> numbers below should be treated as a baseline, not a final result.
+
+149 GT-filtered cases → 695 (case, agency, role) rows extracted;
+evaluated at the (case, agency) pair level against 367 GT pairs with
+`gpt-4.1-mini`.
+
+| Model | n | Precision | Recall | F1 |
+|---|---:|---:|---:|---:|
+| gpt-4.1-mini | 367 | **0.8394** | **0.8822** | **0.8602** |
+
+See [`packages/involved-agency/README.md`](packages/involved-agency/README.md).
 
 ### Pipelines without ground truth
 
