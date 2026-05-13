@@ -1,9 +1,10 @@
 # PRAP — Police Records Access Project
 
-This repository contains code produced for the Police Records Access Project (https://bids.berkeley.edu/california-police-records-access-project)
-
-Each pipeline is its own installable package; all share a small domain-free `prap-core` library (LiteLLM wrapper, OCR
-adapters, PDF utilities, jsonl I/O, prompt loader, evaluation primitives).
+This repository contains code produced for the [Police Records Access Project](https://bids.berkeley.edu/california-police-records-access-project),
+a collection of pipelines that turn raw government disclosures about
+California police cases into structured data. Each pipeline lives in
+its own package under `packages/` and shares a common `prap-core`
+library for LLM calls, OCR, PDF handling, and evaluation.
 
 ## Contents
 
