@@ -1,6 +1,6 @@
 # PRAP — Police Records Access Project
 
-This repository contains code produced for the [Police Records Access Project](https://bids.berkeley.edu/california-police-records-access-project),
+This repository contains code produced for the [Police Records Access Project](https://bids.berkeley.edu/california-police-records-access-project) by the Berkeley Institute for Data Science (BIDS)/UC Berkeley Epic Lab,
 a collection of pipelines that turn raw government disclosures about
 California police cases into structured data. Each pipeline lives in
 its own package under `packages/` and shares a common `prap-core`
